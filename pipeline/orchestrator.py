@@ -237,7 +237,6 @@ class AntiTheftOrchestrator:
                             payload = json.dumps(relatorio_db)
                             print(f"\n[PAYLOAD PARA A CLOUD] -> {payload}\n")
 
-                # (O código original do João para preparar o ecrã)
                 output = self.renderer.render(frame, keypoints, scores)
 
                 # --- 4. DESENHAR AS CAIXAS PERFEITAS NO ECRÃ ---
@@ -245,7 +244,7 @@ class AntiTheftOrchestrator:
                     x1, y1, x2, y2 = pessoa['box']
                     track_id = pessoa['id']
                     
-                    cv2.rectangle(output, (x1, y1), (x2, y2), (0, 255, 0), 3)
+                    cv2.rectangle(output, (x1 // 2, y1 // 2), (x2 // 2, y2 // 2), (0, 255, 0), 3)
                     cv2.putText(output, f"ID: {track_id}", (x1, max(0, y1 - 10)), 
                                 cv2.FONT_HERSHEY_DUPLEX, 0.8, (0, 255, 0), 2)
 
