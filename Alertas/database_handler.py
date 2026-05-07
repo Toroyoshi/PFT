@@ -40,15 +40,3 @@ class DatabaseHandler:
     def fechar(self):
         """Fecha a ligação com segurança."""
         self.conn.close()
-
-    # def fetch_alerts(self, criteria):
-    #     # Code to fetch alerts from the database based on certain criteria
-    #     pass
-
-    # def update_alert(self, alert_id, update_data):
-    #     # Code to update an existing alert in the database
-    #     pass
-
-    # def delete_alert(self, alert_id):
-    #     # Code to delete an alert from the database
-    #     pass
