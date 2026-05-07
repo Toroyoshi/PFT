@@ -1,9 +1,11 @@
+import os
 import time
 import json
 import cv2
 import numpy as np
 import torch
 
+from Alertas.database_handler import DatabaseHandler
 from bytetracker import BYTETracker
 from Detecao.detector_factory import create_detector
 from .activity_loader import load_activities
@@ -40,10 +42,11 @@ class AntiTheftOrchestrator:
         self.tracker = BYTETracker(
             track_thresh=0.5, 
             track_buffer=30, 
-            match_thresh=0.8, 
-            #mot20=False
+            match_thresh=0.8
         )
         self.last_tracked_objects = []
+
+        self.db = DatabaseHandler()
 
     def _print_startup(self):
         print("\n" + "=" * 60)
@@ -228,14 +231,14 @@ class AntiTheftOrchestrator:
                             self.alert_dispatcher.dispatch(event)
                             alert_text = f"ALERTA: {event.tipo} ({event.confianca:.0%})"
 
-                            relatorio_db = {
-                                "timestamp": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp)),
-                                "track_id": pessoa['id'],
-                                "tipo_alerta": event.tipo,
-                                "confianca": round(event.confianca * 100, 2)
-                            }
-                            payload = json.dumps(relatorio_db)
-                            print(f"\n[PAYLOAD PARA A CLOUD] -> {payload}\n")
+                            # Guardamos os dados de forma limpa
+                            self.db.salvar_alerta(
+                                track_id=pessoa['id'],
+                                tipo_alerta=event.tipo,
+                                confianca=event.confianca * 100 # Guardamos como percentagem 0-100
+                            )
+
+                            print(f"[DB] Registado: ID {pessoa['id']} a fazer {event.tipo}")
 
                 output = self.renderer.render(frame, keypoints, scores)
 
