@@ -1,3 +1,8 @@
+# Ignore all files in the Data directory
+Edge/Visualizar_Data/Data/*
+Edge/Visualizar_Data/Output/*
+Edge/Visualizar_Data/Manifests/*
+
 # Python cache/artifacts
 __pycache__/
 *.py[cod]
@@ -10,4 +15,10 @@ mmpose_fix/
 venv_tracking/
 
 # Runtime output
-Alertas/history/eventos_*.json
+Edge/Alertas/history/eventos_*.json
+
+Edge/models/hub/
+
+/Edge/Visualizar_Data/test_output
+
+/Metricas
