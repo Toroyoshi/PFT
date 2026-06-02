@@ -73,7 +73,7 @@ const isLoading = ref(true)
 const alertList = ref([])
 let fetchInterval = null
 
-const API_URL = 'http://20.251.152.37:8000/api/metricas/cluster'
+const API_URL = 'http://projeto-antifurto-vm1.norwayeast.cloudapp.azure.com:8000/api/metricas/cluster'
 
 const fetchAlerts = async () => {
   try {
@@ -130,5 +130,49 @@ html, body, #app {
   display: flex;
   flex-direction: column;
   gap: 2rem;
+}
+
+/* Responsivo para tablets */
+@media (max-width: 1024px) {
+  .main-area {
+    padding: 2rem 2.5rem;
+  }
+  .page-header h1 {
+    font-size: 1.5rem;
+  }
+}
+
+/* Responsivo para mobile */
+@media (max-width: 768px) {
+  .app-layout {
+    flex-direction: column;
+  }
+  
+  .main-area {
+    padding: 1.5rem 1.25rem;
+  }
+  
+  .page-header h1 {
+    font-size: 1.3rem;
+  }
+  
+  .vertical-layout {
+    gap: 1.5rem;
+  }
+}
+
+/* Mobile pequeno */
+@media (max-width: 480px) {
+  .main-area {
+    padding: 1rem;
+  }
+  
+  .page-header h1 {
+    font-size: 1.1rem;
+  }
+  
+  .vertical-layout {
+    gap: 1rem;
+  }
 }
 </style>

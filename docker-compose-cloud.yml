@@ -1,7 +1,9 @@
 
 services:
   api_backend:
-    image: goncalofcouto/api_backend:latest  # <--- APENAS TESTE LOCAL
+    image: goncalofcouto/api_backend:latest
+    environment:
+      - DATABASE_URL=postgresql://admin:123@db_master:5432/antifurto_db
     build: 
       context: ./Backend  
     ports:
@@ -54,6 +56,20 @@ services:
       - rede_cluster
     volumes:
       - dados_replica:/bitnami/postgresql
+
+  docker-proxy:
+      image: tecnativa/docker-socket-proxy
+      environment:
+        - SERVICES=1
+        - TASKS=1
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock:ro 
+      networks:
+        - rede_cluster
+      deploy:
+        placement:
+          constraints:
+            - node.role == manager 
 
 networks:
   rede_cluster:
