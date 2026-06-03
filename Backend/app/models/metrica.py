@@ -7,7 +7,7 @@ class MetricaNodeModel(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     node_id = Column(String, index=True)
-    timestamp = Column(Float)
+    timestamp = Column(DateTime, index=True)
     fps = Column(Float)
     frame_count = Column(Integer)
     detection_count = Column(Integer)

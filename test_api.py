@@ -106,7 +106,7 @@ def test_endpoint_metricas_cluster():
         if response.status_code == 200:
             data = response.json()
             print_success(f"Endpoint respondendo")
-            metrics = data.get('cluster_metrics', {})
+            metrics = data.get('cluster_metrics') or {}
             print(f"  Métricas Agregadas:")
             print(f"    • Nós ativos: {metrics.get('num_nodes', 0)}")
             print(f"    • FPS médio: {metrics.get('media_fps', 0)}")
@@ -256,16 +256,16 @@ def run_all_tests():
     
     print_info(f"URL da API: {API_BASE_URL}")
     print_info("Certifique-se que o servidor está em execução:")
-    print_info("  cd Backend && uvicorn main_api:app --reload")
+    print_info("  cd Backend && python -m uvicorn app.main_api:app --host 127.0.0.1 --port 8000")
     
     tests = [
         ("Endpoint Raiz", test_endpoint_root),
         ("Alertas Recentes", test_endpoint_alertas),
         ("Métricas Atuais", test_endpoint_metricas_atuais),
+        ("Registar Métricas", test_endpoint_registar_metricas),
         ("Métricas do Cluster", test_endpoint_metricas_cluster),
         ("Métricas de Nó", test_endpoint_metricas_node),
         ("Histórico", test_endpoint_historico),
-        ("Registar Métricas", test_endpoint_registar_metricas),
     ]
     
     results = []

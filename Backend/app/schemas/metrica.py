@@ -8,7 +8,7 @@ from datetime import datetime
 # O formato exato do JSON que o teu Edge gera
 class MetricaNodeBase(BaseModel):
     node_id: str
-    timestamp: float
+    timestamp: Optional[float] = None
     fps: float
     frame_count: int
     detection_count: int
@@ -16,7 +16,7 @@ class MetricaNodeBase(BaseModel):
     average_inference_ms: float
     success_rate: float
     uptime_seconds: float
-    pessoas_detetadas: int
+    pessoas_detetadas: int = 0
 
 class MetricaNodeCreate(MetricaNodeBase):
     pass

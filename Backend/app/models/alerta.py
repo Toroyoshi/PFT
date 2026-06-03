@@ -7,7 +7,7 @@ class AlertaModel(Base):
     __tablename__ = "alertas"
 
     id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    timestamp = Column(DateTime, index=True)
     track_id = Column(Integer, nullable=False)
     tipo_alerta = Column(String(50), nullable=False)
     confianca = Column(Float, nullable=False)
