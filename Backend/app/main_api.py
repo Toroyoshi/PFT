@@ -390,7 +390,8 @@ def register_metrics(metrica: MetricaNodeCreate, db: Session = Depends(get_db)):
             inference_calls=metrica.inference_calls,
             average_inference_ms=metrica.average_inference_ms,
             success_rate=metrica.success_rate,
-            uptime_seconds=metrica.uptime_seconds
+            uptime_seconds=metrica.uptime_seconds,
+            pessoas_detetadas=metrica.pessoas_detetadas
         )
         db.add(nova_metrica)
         db.commit()

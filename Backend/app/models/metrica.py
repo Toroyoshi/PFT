@@ -15,4 +15,5 @@ class MetricaNodeModel(Base):
     average_inference_ms = Column(Float)
     success_rate = Column(Float)
     uptime_seconds = Column(Float)
+    pessoas_detetadas = Column(Integer, default=0)
     data_recebida = Column(DateTime, default=datetime.utcnow)
