@@ -1,6 +1,6 @@
 # Ignore all files in the Data directory
 Edge/Visualizar_Data/Data/*
-Edge/Visualizar_Data/Output/*
+# Edge/Visualizar_Data/Output/*
 Edge/Visualizar_Data/Manifests/*
 
 # Python cache/artifacts
