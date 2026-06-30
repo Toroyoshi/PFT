@@ -7,11 +7,12 @@ camera:
   width: 640
   height: 480
   fps: 30
-  #backend: CAP_DSHOW
-  backend: CAP_ANY
+  backend: CAP_DSHOW
+  #backend: CAP_ANY
 
 runtime:
-  frame_skip: 2
+  alert_cooldown_frames: 45
+  activity_smoothing_window: 5
   cache_result: true
   debug: false
   api_url: "http://projeto-antifurto-vm1.norwayeast.cloudapp.azure.com:8000"  # Endereço da API na Cloud
@@ -26,22 +27,23 @@ detector:
     use_gpu: true
 
 activities:
-  - enabled: false
+  - enabled: true
     plugin: Atividades_Suspeitas.shoplifting_detector:ShopliftingActivityDetector
     params:
-      model_path: ./models/activity_classifier.pth
-      seq_length: 45
-      threshold: 0.50
-      cooldown_frames: 45
+      model_path: ./models/phase4_experiment_model.onnx
+      seq_length: 60
+      threshold: 0.35
+      cooldown_frames: 60
+
   - enabled: false
     plugin: Atividades_Suspeitas.velocity_detector:VelocityDetector
     params:
-      velocidade_maxima: 200.0
+      velocidade_maxima: 8.0
 
-  - enabled: true
+  - enabled: false
     plugin: Atividades_Suspeitas.posture_detector:PostureDetector
     params:
-      agachamento_threshold: 0.6
+      agachamento_threshold: 0.9
       tempo_minimo: 5
 
   - enabled: false
@@ -52,18 +54,29 @@ activities:
 
 alerts:
   handlers:
-    - enabled: true
+    - enabled: false
       plugin: Alertas.alert_system:AlertSystem
       params:
         pasta_alertas: ./Alertas/history/
         save_json: true
         verbose: true
+    - enabled: true
+      plugin: Alertas.auto_clip_extractor:AutoClipExtractor
+      params:
+        pasta_clips: ./Alertas/clips/
+        largura: 640
+        altura: 480
+        fps: 30.0
+        pre_event_frames: 90
+        post_event_frames: 300
 
 visualization:
   enabled: true
   show_skeleton_canvas: true
-  confidence_threshold: 0.3
+  confidence_threshold: 0.1
   window_name: ANTI-FURTO
+  max_display_width: 1000
+  max_display_height: 750
   colors:
     line: [0, 255, 255]
     point: [0, 255, 0]
@@ -73,38 +86,91 @@ visualization:
     warning: [0, 0, 255]
     muted: [200, 200, 200]
 
+zone_tracking:
+  enabled: false
+  draw_zones: true
+  grab_detection_enabled: true
+  min_hold_frames: 10
+  entry_speed_threshold: 5.0
+  arm_flex_threshold: 0.85
+  deceleration_threshold: 0.5
+  zones:
+    - id: 1
+      name: Zona 1
+      rect: [250, 85, 480, 145]
+      color: [192, 224, 255]
+    - id: 2
+      name: Zona 2
+      rect: [250, 150, 480, 185]
+      color: [255, 240, 180]
+    - id: 3
+      name: Zona 3
+      rect: [250, 190, 480, 225]
+      color: [200, 255, 200]
+    - id: 4
+      name: Zona 4
+      rect: [250, 230, 480, 260]
+      color: [255, 200, 200]
+    - id: 5
+      name: Zona 5
+      rect: [250, 265, 480, 300]
+      color: [255, 200, 200]
+
 tracker:
   track_thresh: 0.35
   track_buffer: 90
   match_thresh: 0.7
+  dedup_thresh: 0.55
 
 temporal_filtering:
   enabled: true
-  # Core smoothing parameters
-  smoothing_factor: 0.6                      # EMA factor for slow/normal movements
-  smoothing_factor_fast: 0.85                # EMA factor for rapid movements (shoplifting grabs)
-  rapid_movement_threshold: 5.0              # px/frame threshold to trigger fast mode
-  velocity_smoothing: 0.3                    # EMA factor for velocity smoothing
-  occlusion_confidence_threshold: 0.3        # Threshold below which keypoint is occluded
-  max_occlusion_frames: 5                    # Max frames to predict during occlusion
-  velocity_damping: 0.94                     # Velocity decay during occlusion (0.94 = 6% loss/frame)
+  # One-Euro Filter parameters (NEW)
+  one_euro_min_cutoff: 0.8                   # Low frequency cutoff (increased to reduce baseline lag)
+  one_euro_beta: 0.80                        # High frequency adaptive factor (tuned for ultra-fast grab response)
+  one_euro_d_cutoff: 1.0                     # Velocity filter cutoff
   
+  # Confidence Hysteresis
+  confidence_high: 0.40                      # Confidence to reappear (lowered to acquire fast arms quickly)
+  confidence_low: 0.15                       # Confidence to disappear (lowered to PREVENT dropping out during motion blur!)
+
+  # Occlusion handling
+  occlusion_confidence_threshold: 0.35       # Kept for fallback/propagation
+  max_occlusion_frames: 15                   # Max frames to predict during occlusion (extended for kinematic prediction)
+  velocity_damping: 0.92                     # Absolute velocity decay per frame during occlusion (body root joints)
+  rel_vel_damping: 0.88                      # Relative velocity decay per frame (limb swing during occlusion)
+  occlusion_conf_decay: 0.75                 # Exponential factor for confidence fade during occlusion (0.75^t)
+
+  # Confidence-trust modulation: alpha_effective = alpha_base * score^power
+  conf_trust_power: 0.5
+
+  # Body-rotation compensation
+  # When the whole body moves > threshold px/frame (turn, sidestep),
+  # add extra beta to ALL joints so arms don't lag behind the torso.
+  body_motion_threshold: 8.0                 # px/frame CoM speed to trigger boost
+  body_motion_beta: 0.30                     # Extra beta added per px above threshold
+
+  # Per-joint beta multipliers (distal joints are more responsive)
+  distal_beta_mult: 2.5                      # Wrists + ankles multiplier vs base beta
+
   # Skeletal constraint parameters
-  limb_stretch_threshold: 1.5                # Max allowed limb length ratio vs baseline (1.5 = 50% stretch)
+  limb_stretch_threshold: 1.2                # Max allowed limb length ratio vs torso scale
   # Feature toggles
   enable_hierarchical_confidence: true       # If parent occluded, reduce children
   
   # Head & arm motion handling (NEW - user-requested fixes)
   disable_head_prediction: true              # Don't predict eyes/nose when out of frame (drop instead)
 
+  # Anti-Teleport Shield
+  max_velocity_ratio: 0.20                   # Max allowed jump per frame relative to person scale
+
 spatial_normalization:
   enabled: true
   torso_confidence_threshold: 0.5
   min_torso_length_px: 10.0
-  allow_invalid_torso: false
+  allow_invalid_torso: true
   visualization:
     debug_mode: true
-    canvas_size: 500
+    canvas_size: 800
     show_labels: true
   bbox_padding:
     x: 25
@@ -113,12 +179,12 @@ spatial_normalization:
 
 # Phase 4: sequence classification (shoplifting vs normal)
 phase4:
-  sequence_length: 30
-  input_size: 34
+  sequence_length: 60
+  input_size: 60
   hidden_size: 128
-  num_layers: 1
+  num_layers: 2
   attention_size: 64
-  dropout: 0.1
+  dropout: 0.2
   learning_rate: 0.001
   batch_size: 16
   epochs: 30

@@ -45,6 +45,49 @@
       </div>
     </div>
 
+    <!-- Máquinas Virtuais (Nós no Docker Swarm) -->
+    <div class="infra-section vms-section">
+      <div class="section-header">
+        <h3>🖥️ Máquinas Virtuais (Swarm Nodes)</h3>
+      </div>
+      
+      <div v-if="infraError" class="error-msg">
+        ⚠️ Falha na obtenção das VMs...
+      </div>
+
+      <div v-else>
+        <div class="services-list">
+          <div v-for="node in infraNodes" :key="node.id" class="service-card vms-card">
+            <div class="service-header vms-header">
+              <div class="service-info">
+                <div class="service-name">{{ node.hostname }}</div>
+                <span class="service-id">{{ node.id }}</span>
+              </div>
+              <span class="role-badge" :class="node.role">{{ node.role }}</span>
+            </div>
+            
+            <div class="service-details">
+              <div class="detail">
+                <span class="detail-label">IP (Rede)</span>
+                <span class="detail-value">{{ node.ip || '---' }}</span>
+              </div>
+              <div class="detail">
+                <span class="detail-label">Disponibilidade</span>
+                <span class="detail-value">{{ node.availability }}</span>
+              </div>
+              <div class="detail">
+                <span class="detail-label">Estado Node</span>
+                <span class="status-badge" :class="{ 'healthy': node.status === 'ready', 'failed': node.status !== 'ready' }">
+                  <span class="status-dot" :class="{ 'bg-green': node.status === 'ready', 'bg-red': node.status !== 'ready' }"></span>
+                  {{ node.status === 'ready' ? 'Pronto' : 'Falha' }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
   <div class="infra-section">
       <div class="section-header">
         <h3>☁️ Estado da Infraestrutura (Docker Swarm)</h3>
@@ -62,9 +105,19 @@
                 <div class="service-name">{{ svc.name }}</div>
                 <span class="service-id">{{ svc.id }}</span>
               </div>
-              <button class="delete-btn" @click="deleteService(svc.id)" :title="`Eliminar ${svc.name}`">
-                🗑️ Apagar
-              </button>
+              
+              <!-- Ações de Escala -->
+              <div class="service-actions" v-if="svc.mode === 'replicated'">
+                <div class="scale-group" >
+                  <button v-if="svc.replicas_target > 1" class="action-btn scale" @click="scaleService(svc.id, Math.max(1, svc.replicas_target - 1))" title="Reduzir Réplica (-)">
+                    -
+                  </button>
+                  <button class="action-btn scale" @click="scaleService(svc.id, svc.replicas_target + 1)" title="Aumentar Réplica (+)">
+                    +
+                  </button>
+                </div>
+              </div>
+
             </div>
             
             <div class="service-details">
@@ -162,14 +215,13 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
+import { API_BASE, API_URL } from '../utils/api.js'
 
 const apiConnected = ref(false)
 const isLoading = ref(true)
 const clusterMetrics = ref({})
 const nodes = ref([])
 let fetchInterval = null
-
-const API_URL = 'http://projeto-antifurto-vm1.norwayeast.cloudapp.azure.com:8000/api/metricas/cluster'
 
 const formatUptime = (seconds) => {
   if (!seconds) return '0s'
@@ -206,7 +258,6 @@ const fetchClusterMetrics = async () => {
         method: 'GET',
         headers: {
             'Content-Type': 'application/json',
-            // O CORS no backend já aceita tudo, mas é bom garantir
         }
     })
     
@@ -229,9 +280,11 @@ const fetchClusterMetrics = async () => {
 }
 
 const infraServices = ref([])
+const infraNodes = ref([])
 const infraError = ref(null)
 
-const INFRA_API_URL = 'http://20.251.152.37:8000/api/infra/services' 
+const INFRA_API_URL = `${API_BASE}/infra/services`
+const NODES_API_URL = `${API_BASE}/infra/nodes`
 
 const fetchInfraStatus = async () => {
   try {
@@ -251,23 +304,38 @@ const fetchInfraStatus = async () => {
   }
 }
 
-const deleteService = async (serviceId) => {
-  if (!confirm(`Tem a certeza que deseja eliminar este serviço?`)) return
+const fetchInfraNodes = async () => {
+  try {
+    const response = await fetch(NODES_API_URL)
+    const data = await response.json()
+    
+    if (!data.error) {
+      infraNodes.value = data
+    }
+  } catch (error) {
+    console.error('Erro nos Nós:', error)
+  }
+}
+
+const scaleService = async (serviceId, replicas, isStart = false) => {
+  const actionText = replicas === 0 ? 'PARAR (reduzir a 0 réplicas)' : (isStart ? 'LIGAR (iniciar 1 réplica)' : `escalar para ${replicas} réplica(s)`)
+  if (!confirm(`Tem a certeza que deseja ${actionText} este serviço?`)) return
   
   try {
-    const response = await fetch(`${INFRA_API_URL.replace('/api/infra/services', '')}/api/infra/services/${serviceId}`, {
-      method: 'DELETE',
+    const response = await fetch(`${INFRA_API_URL}/${serviceId}/scale`, {
+      method: 'POST',
       headers: {
         'Content-Type': 'application/json'
-      }
+      },
+      body: JSON.stringify({ replicas })
     })
     
-    if (!response.ok) throw new Error(`Erro ao eliminar: ${response.status}`)
+    if (!response.ok) throw new Error(`Erro ao escalar: ${response.status}`)
     
     await fetchInfraStatus()
   } catch (error) {
-    console.error('Erro ao eliminar serviço:', error)
-    infraError.value = 'Falha ao eliminar o serviço'
+    console.error('Erro ao escalar serviço:', error)
+    infraError.value = 'Falha ao alterar as réplicas do serviço'
   }
 }
 
@@ -277,505 +345,14 @@ onMounted(() => {
   fetchClusterMetrics()
   fetchInterval = setInterval(fetchClusterMetrics, 5000) 
   fetchInfraStatus()
-  setInterval(fetchInfraStatus, 10000) // Atualizar a cada 10 segundos
+  fetchInfraNodes()
+  setInterval(() => {
+    fetchInfraStatus()
+    fetchInfraNodes()
+  }, 10000) // Atualizar a cada 10 segundos
 })
 
 
 
 </script>
 
-<style scoped>
-.metrics-container {
-  display: flex;
-  flex-direction: column;
-  gap: 2rem;
-}
-
-/* Status Conexão */
-.connection-status {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 1rem 1.5rem;
-  border-radius: 6px;
-  font-size: 0.95rem;
-  font-weight: 600;
-}
-
-.connection-status.connected {
-  background-color: #ecfdf5;
-  color: #065f46;
-  border: 1px solid #d1fae5;
-}
-
-.connection-status.disconnected {
-  background-color: #fef2f2;
-  color: #991b1b;
-  border: 1px solid #fee2e2;
-}
-
-.status-indicator {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-}
-
-.connection-status.connected .status-indicator {
-  background-color: #10b981;
-}
-
-.connection-status.disconnected .status-indicator {
-  background-color: #ef4444;
-}
-
-/* Grid de Métricas */
-.metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 1.5rem;
-}
-
-.metric-card {
-  background: white;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 1.5rem;
-  text-align: center;
-  transition: all 0.3s ease;
-}
-
-.metric-card:hover {
-  border-color: #cbd5e1;
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07);
-}
-
-.metric-label {
-  font-size: 0.85rem;
-  color: #64748b;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 0.75rem;
-}
-
-.metric-value {
-  font-size: 2rem;
-  font-weight: 700;
-  color: #0f172a;
-  margin-bottom: 0.5rem;
-}
-
-.metric-subtitle {
-  font-size: 0.8rem;
-  color: #94a3b8;
-}
-
-/* Seção de Infraestrutura */
-.infra-section {
-  background: white;
-  border-radius: 8px;
-  border: 1px solid #e2e8f0;
-  padding: 2rem;
-}
-
-.services-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 1.5rem;
-}
-
-.service-card {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 1.5rem;
-  transition: all 0.3s ease;
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-
-.service-card:hover {
-  border-color: #cbd5e1;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-}
-
-.service-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 1rem;
-  padding-bottom: 1rem;
-  border-bottom: 1px solid #e2e8f0;
-}
-
-.service-info {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-
-.service-name {
-  font-size: 1.1rem;
-  font-weight: 700;
-  color: #0f172a;
-}
-
-.service-id {
-  font-size: 0.75rem;
-  color: #94a3b8;
-  font-family: monospace;
-  letter-spacing: 0.5px;
-}
-
-.service-details {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1rem;
-}
-
-.detail {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-}
-
-.detail-label {
-  font-size: 0.7rem;
-  color: #64748b;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.detail-value {
-  font-size: 0.95rem;
-  color: #0f172a;
-  font-weight: 600;
-}
-
-.replica-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0.4rem 0.8rem;
-  background: #fef3c7;
-  color: #92400e;
-  border-radius: 4px;
-  font-size: 0.85rem;
-  font-weight: 600;
-}
-
-.replica-badge.healthy {
-  background: #d1fae5;
-  color: #065f46;
-}
-
-.status-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.4rem 0.8rem;
-  border-radius: 4px;
-  font-size: 0.85rem;
-  font-weight: 600;
-}
-
-.status-badge.healthy {
-  background: #d1fae5;
-  color: #065f46;
-}
-
-.status-badge.failed {
-  background: #fee2e2;
-  color: #991b1b;
-}
-
-.status-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.status-dot.bg-green {
-  background-color: #10b981;
-}
-
-.status-dot.bg-red {
-  background-color: #ef4444;
-}
-
-/* Botão Apagar */
-.delete-btn {
-  background-color: #ef4444;
-  color: white;
-  border: none;
-  padding: 0.5rem 1rem;
-  border-radius: 6px;
-  font-size: 0.8rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.delete-btn:hover {
-  background-color: #dc2626;
-  box-shadow: 0 4px 8px rgba(220, 38, 38, 0.25);
-  transform: translateY(-1px);
-}
-
-.delete-btn:active {
-  background-color: #b91c1c;
-  transform: translateY(0);
-}
-
-/* Seção de Nós */
-.nodes-section {
-  background: white;
-  border-radius: 8px;
-  border: 1px solid #e2e8f0;
-  padding: 2rem;
-}
-
-.section-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 1.5rem;
-}
-
-.section-header h3 {
-  margin: 0;
-  color: #0f172a;
-  font-size: 1.2rem;
-}
-
-.refresh-btn {
-  padding: 0.5rem 1rem;
-  background: #f1f5f9;
-  border: 1px solid #cbd5e1;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 0.9rem;
-  color: #475569;
-  transition: all 0.2s ease;
-}
-
-.refresh-btn:hover {
-  background: #e2e8f0;
-  border-color: #94a3b8;
-}
-
-.refresh-btn.loading {
-  opacity: 0.6;
-}
-
-/* Seção de Infraestrutura */
-.nodes-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 1.5rem;
-}
-
-.node-card {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 6px;
-  padding: 1.5rem;
-  overflow: hidden;
-}
-
-.node-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 1rem;
-  padding-bottom: 1rem;
-  border-bottom: 1px solid #e2e8f0;
-}
-
-.node-id {
-  font-weight: 700;
-  color: #0f172a;
-  font-size: 1rem;
-}
-
-.node-status {
-  font-size: 0.8rem;
-  font-weight: 600;
-  padding: 0.4rem 0.8rem;
-  border-radius: 4px;
-  white-space: nowrap;
-}
-
-.node-status.healthy {
-  background: #d1fae5;
-  color: #065f46;
-}
-
-.node-status.warning {
-  background: #fef3c7;
-  color: #92400e;
-}
-
-.node-status.unhealthy {
-  background: #fee2e2;
-  color: #991b1b;
-}
-
-/* Grid de Detalhes */
-.node-details-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 1rem;
-}
-
-.detail-item {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-
-.detail-label {
-  font-size: 0.75rem;
-  color: #64748b;
-  font-weight: 600;
-  text-transform: uppercase;
-}
-
-.detail-value {
-  font-size: 0.95rem;
-  color: #0f172a;
-  font-weight: 600;
-}
-
-/* Responsivo para tablets */
-@media (max-width: 1024px) {
-  .metrics-container {
-    gap: 1.5rem;
-  }
-  .card {
-    padding: 1.5rem;
-  }
-  .node-card {
-    padding: 1rem;
-  }
-  .node-details-grid {
-    gap: 0.75rem;
-  }
-  .section-header h3 {
-    font-size: 1.1rem;
-  }
-}
-
-/* Responsivo para mobile */
-@media (max-width: 768px) {
-  .metrics-container {
-    gap: 1rem;
-  }
-  .card {
-    padding: 1rem;
-    border-radius: 6px;
-  }
-  .section-header {
-    flex-direction: column;
-    gap: 0.75rem;
-  }
-  .section-header h3 {
-    font-size: 1rem;
-    margin: 0;
-  }
-  .refresh-btn {
-    width: 100%;
-  }
-  .nodes-grid {
-    grid-template-columns: 1fr;
-    gap: 1rem;
-  }
-  .node-card {
-    padding: 0.75rem;
-  }
-  .node-header {
-    gap: 0.5rem;
-    flex-wrap: wrap;
-  }
-  .node-id {
-    font-size: 0.95rem;
-  }
-  .node-status {
-    font-size: 0.7rem;
-    padding: 0.3rem 0.6rem;
-  }
-  .node-details-grid {
-    grid-template-columns: 1fr;
-    gap: 0.5rem;
-  }
-  .detail-label {
-    font-size: 0.7rem;
-  }
-  .detail-value {
-    font-size: 0.85rem;
-  }
-  .summary-grid {
-    grid-template-columns: 1fr 1fr;
-  }
-}
-
-/* Mobile pequeno */
-@media (max-width: 480px) {
-  .metrics-container {
-    gap: 0.75rem;
-  }
-  .card {
-    padding: 0.75rem;
-  }
-  .card-title {
-    font-size: 1rem;
-  }
-  .summary-grid {
-    grid-template-columns: 1fr;
-  }
-  .summary-item-value {
-    font-size: 1.3rem;
-  }
-  .summary-item-label {
-    font-size: 0.75rem;
-  }
-  .nodes-grid {
-    gap: 0.75rem;
-  }
-  .node-id {
-    font-size: 0.85rem;
-  }
-}
-
-/* Estados Vazios e Carregamento */
-.empty-state,
-.loading-state {
-  text-align: center;
-  padding: 3rem 2rem;
-  background: white;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  color: #64748b;
-}
-
-.empty-state p,
-.loading-state p {
-  margin: 0.5rem 0;
-}
-
-.empty-state .subtitle {
-  font-size: 0.9rem;
-  color: #94a3b8;
-}
-
-.loading-state {
-  font-weight: 600;
-}
-</style>
