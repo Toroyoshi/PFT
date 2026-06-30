@@ -1,101 +1,133 @@
 """
 Detector de Agachamento
-Detecta quando pessoa está agachada (típico de roubo em loja)
+Detecta quando a pessoa está agachada (típico de roubo em prateleiras baixas) usando ângulos de articulação.
 """
 
-from typing import List, Optional
-from .base_activity import BaseActivity, SuspiciousEvent
+from typing import Optional
 import numpy as np
 
-# Índices de keypoints para o corpo (COCO 17)
-NOSE = 0
-NECK = 1  # Média dos ombros
-OMBRO_ESQ = 5
-OMBRO_DIR = 6
-QUADRIL_ESQ = 11
-QUADRIL_DIR = 12
-TORNOZELO_ESQ = 15
-TORNOZELO_DIR = 16
+from .base_activity import BaseActivity, SuspiciousEvent
+from Detecao.skeleton import (
+    LEFT_SHOULDER, RIGHT_SHOULDER,
+    LEFT_HIP, RIGHT_HIP,
+    LEFT_KNEE, RIGHT_KNEE,
+    LEFT_ANKLE, RIGHT_ANKLE
+)
+from pipeline.spatial_normalizer import NormalizedPose
+
+
+def calcula_angulo(p1, p2, p3):
+    """Calcula o ângulo interior formado pelos pontos p1-p2-p3 (com vértice p2) em graus."""
+    v1 = p1 - p2
+    v2 = p3 - p2
+    norm1 = np.linalg.norm(v1)
+    norm2 = np.linalg.norm(v2)
+    if norm1 < 1e-5 or norm2 < 1e-5:
+        return 180.0  # Retorna esticado por defeito se falhar
+    cos_theta = np.dot(v1, v2) / (norm1 * norm2)
+    return np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
+
 
 class PostureDetector(BaseActivity):
-    """Detecta postura (agachamento, deitado, etc)."""
-    
-    def __init__(self, agachamento_threshold: float = 0.6, tempo_minimo: int = 5):
-        super().__init__("agachamento", threshold=0.5)
-        self.agachamento_threshold = agachamento_threshold
+    """Detecta postura (agachamento) usando a extensão vertical do corpo (compressão da pose)."""
+
+    def __init__(self, agachamento_threshold: float = 1.3, tempo_minimo: int = 5, cooldown_frames: int = 60):
+        super().__init__("agachamento", threshold=agachamento_threshold)
         self.tempo_minimo = tempo_minimo
-        
-        # Contador de frames em agachamento
-        self.frames_agachado = 0
-        
-    def detecta(self, 
-                keypoints: List[tuple], 
-                scores: List[float],
+        self.cooldown_frames = cooldown_frames
+
+        # Estado por track_id
+        self.frames_agachado = {}           # track_id -> frames consecutivos agachado
+        self.frames_since_last_alerts = {}  # track_id -> int (cooldown tracker)
+
+    def limpa_tracks_inativas(self, ids_presentes: set):
+        """Limpa o histórico de tracks inativas para evitar vazamento de memória."""
+        for track_id in list(self.frames_agachado.keys()):
+            if track_id not in ids_presentes:
+                self.frames_agachado.pop(track_id, None)
+                self.frames_since_last_alerts.pop(track_id, None)
+
+    def detecta(self,
+                norm_pose: NormalizedPose,
                 frame_id: int,
-                timestamp: float) -> Optional[SuspiciousEvent]:
-        """
-        Detecta agachamento.
-        
-        Compara altura do quadril com altura do corpo total.
-        Se quadril está muito baixo = agachado.
-        """
-        
-        if not keypoints or len(keypoints) < 17:
-            self.frames_agachado = 0
+                timestamp: float,
+                track_id: Optional[int] = None) -> Optional[SuspiciousEvent]:
+        tid = 0 if track_id is None else track_id
+
+        if tid not in self.frames_agachado:
+            self.frames_agachado[tid] = 0
+            self.frames_since_last_alerts[tid] = self.cooldown_frames
+
+        self.frames_since_last_alerts[tid] += 1
+
+        if not norm_pose or not norm_pose.is_valid:
+            self.frames_agachado[tid] = 0
             return None
+
+        kp = norm_pose.keypoints
+        sc = norm_pose.scores
+
+        # Em vez de ângulos articulares que são complexos e propensos a ruído (dobrar uma perna),
+        # medimos a compressão vertical do corpo.
+        # Na pose normalizada, o pélvis é (0,0) e a escala é o tamanho do torso.
+        # A coordenada Y aumenta para baixo. Logo, a extensão da perna dita se a pessoa está em pé.
         
-        # Verifica confiança dos keypoints importantes
-        keypoints_importantes = [OMBRO_ESQ, OMBRO_DIR, QUADRIL_ESQ, QUADRIL_DIR, TORNOZELO_ESQ, TORNOZELO_DIR]
-        
-        confiancas_validas = all(
-            i < len(scores) and scores[i] > 0.3 
-            for i in keypoints_importantes
-        )
-        
-        if not confiancas_validas:
-            self.frames_agachado = 0
-            return None
-        
-        # Calcula alturas
-        altura_ombros = (keypoints[OMBRO_ESQ][1] + keypoints[OMBRO_DIR][1]) / 2
-        altura_quadris = (keypoints[QUADRIL_ESQ][1] + keypoints[QUADRIL_DIR][1]) / 2
-        altura_tornozelos = (keypoints[TORNOZELO_ESQ][1] + keypoints[TORNOZELO_DIR][1]) / 2
-        
-        # Altura total do corpo
-        altura_total = altura_tornozelos - altura_ombros
-        
-        if altura_total <= 0:
-            return None
-        
-        # Distância do quadril até o pé
-        distancia_quadril_pe = altura_tornozelos - altura_quadris
-        
-        # Razão: se quadril está perto dos pés, está agachado
-        razao = distancia_quadril_pe / altura_total
-        
-        # Se razão < threshold, está agachado
-        is_agachado = razao < self.agachamento_threshold
-        
+        y_ankles = [kp[idx][1] for idx in (LEFT_ANKLE, RIGHT_ANKLE) if sc[idx] > 0.3]
+        y_knees  = [kp[idx][1] for idx in (LEFT_KNEE, RIGHT_KNEE) if sc[idx] > 0.3]
+
+        is_agachado = False
+        extensao_medida = 0.0
+        tipo_extensao = "nenhuma"
+
+        # Thresholds calibrados para o tamanho do torso.
+        threshold_tornozelo = self.threshold
+        threshold_joelho = self.threshold - 0.7  # O joelho é tipicamente 0.7 torsos mais acima que o tornozelo
+
+        if y_ankles:
+            # A extensão máxima da perna é garantida pelo pé que estiver MAIS ESTICADO (maior Y).
+            # Uma pessoa em pé tem max(y_ankles) entre ~1.8 e ~2.0.
+            # Se a pessoa levantar UMA perna, a outra garante que max(y_ankles) continua ~1.8 (evita falsos positivos).
+            extensao_medida = max(y_ankles)
+            if extensao_medida < threshold_tornozelo:
+                is_agachado = True
+            tipo_extensao = "tornozelo"
+        elif y_knees:
+            # Fallback seguro caso os tornozelos estejam ocluídos por prateleiras.
+            # Uma pessoa em pé tem max(y_knees) perto de ~1.0.
+            extensao_medida = max(y_knees)
+            if extensao_medida < threshold_joelho:
+                is_agachado = True
+            tipo_extensao = "joelho"
+
+        # AVALIAR A PERSISTÊNCIA DO AGACHAMENTO
         if is_agachado:
-            self.frames_agachado += 1
-            
-            # Alerta apenas após tempo mínimo agachado
-            if self.frames_agachado >= self.tempo_minimo:
+            self.frames_agachado[tid] += 1
+
+            if (self.frames_agachado[tid] >= self.tempo_minimo and
+                    self.frames_since_last_alerts[tid] >= self.cooldown_frames):
+                self.frames_since_last_alerts[tid] = 0
+                
+                # Confiança inversamente proporcional à extensão (mais encolhido = maior confiança)
+                margem = (threshold_tornozelo if tipo_extensao == "tornozelo" else threshold_joelho)
+                confianca = float(np.clip(1.0 - (extensao_medida / margem) * 0.5, 0.5, 1.0))
+
                 evento = SuspiciousEvent(
                     tipo="agachamento",
                     timestamp=timestamp,
-                    confianca=min(1.0 - razao, 1.0),  # Quanto mais abaixo, mais confiança
+                    confianca=confianca,
                     frame_id=frame_id,
-                    descricao=f"Agachamento detectado por {self.frames_agachado} frames",
+                    pessoa_id=track_id,
+                    descricao=f"Agachamento detetado: Extensao vertical ({tipo_extensao}) encolhida para {extensao_medida:.2f}x o torso",
                     dados_adicionais={
-                        'razao': razao,
-                        'threshold': self.agachamento_threshold,
-                        'frames_agachado': self.frames_agachado
+                        'extensao_medida': float(extensao_medida),
+                        'tipo_extensao': tipo_extensao,
+                        'threshold_usado': float(margem),
+                        'frames_agachado': int(self.frames_agachado[tid])
                     }
                 )
                 self.registra_evento(evento)
                 return evento
         else:
-            self.frames_agachado = 0
-        
+            self.frames_agachado[tid] = 0
+
         return None

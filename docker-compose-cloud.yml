@@ -12,8 +12,7 @@ services:
     networks:
       - rede_cluster              
     deploy:
-      replicas: 1
-      
+      replicas: 3
       update_config:
         parallelism: 1
         delay: 10s
@@ -28,6 +27,10 @@ services:
       - "8080:80"                
     networks:
       - rede_cluster
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
 
   db_master:
     image: bitnami/postgresql:latest
@@ -44,6 +47,11 @@ services:
       - rede_cluster
     volumes:
       - dados_master:/bitnami/postgresql
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
 
   db_replica:
     image: bitnami/postgresql:latest
@@ -54,18 +62,27 @@ services:
       - POSTGRESQL_REPLICATION_USER=repl_user   # Usa o mesmo utilizador de cópia
       - POSTGRESQL_REPLICATION_PASSWORD=senha_replica
       - POSTGRESQL_PASSWORD=123
+      - POSTGRESQL_PASSWORD_FILE=/bitnami/postgresql/.password
     networks:
       - rede_cluster
     volumes:
       - dados_replica:/bitnami/postgresql
+    deploy:
+      placement:
+        constraints: [node.role != manager]
+      restart_policy:
+        condition: on-failure
+        delay: 10s
 
   docker-proxy:
       image: tecnativa/docker-socket-proxy
       environment:
         - SERVICES=1
         - TASKS=1
+        - NODES=1
+        - POST=1
       volumes:
-        - /var/run/docker.sock:/var/run/docker.sock:ro 
+        - /var/run/docker.sock:/var/run/docker.sock 
       networks:
         - rede_cluster
       deploy:

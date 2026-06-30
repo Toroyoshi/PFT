@@ -10,29 +10,17 @@ Designed for real-time sanity checking of translation and scale invariance.
 from typing import Optional, Tuple
 import numpy as np
 import cv2
-from rich import print as rprint
 
 
-# COCO 17 keypoint skeleton connections
-# Each tuple (i, j) means: draw line from keypoint i to keypoint j
-SKELETON_CONNECTIONS = [
-    (0, 1), (0, 2),           # nose -> eyes
-    (1, 3), (2, 4),           # eyes -> ears
-    (5, 6),                   # shoulders
-    (5, 7), (6, 8),           # shoulders -> elbows
-    (7, 9), (8, 10),          # elbows -> wrists
-    (11, 12),                 # hips (pelvis)
-    (5, 11), (6, 12),         # shoulders -> hips
-    (11, 13), (12, 14),       # hips -> knees
-    (13, 15), (14, 16),       # knees -> ankles
-]
+from Detecao.skeleton import (
+    SKELETON_CONNECTIONS,
+    KEYPOINT_NAMES,
+    LEFT_HIP,
+    RIGHT_HIP,
+    LEFT_SHOULDER,
+    RIGHT_SHOULDER
+)
 
-KEYPOINT_NAMES = [
-    'nose', 'l_eye', 'r_eye', 'l_ear', 'r_ear',
-    'l_sho', 'r_sho', 'l_elb', 'r_elb', 'l_wri',
-    'r_wri', 'l_hip', 'r_hip', 'l_kne', 'r_kne',
-    'l_ank', 'r_ank'
-]
 
 # Color scheme: BGR (OpenCV format)
 COLOR_SKELETON_LINE = (0, 255, 255)    # Cyan
@@ -83,6 +71,7 @@ class SkeletonVisualizer:
         self.line_thickness = line_thickness
         self.show_labels = show_labels
         self.show_confidence = show_confidence
+        self._cached_canvas = None
     
     def render(
         self,
@@ -116,14 +105,16 @@ class SkeletonVisualizer:
             if scores.shape != (17,):
                 raise ValueError(f"Expected scores shape (17,), got {scores.shape}")
         
-        # Check for NaN (invalid frame)
-        has_nan = np.isnan(normalized_keypoints).any()
-        
-        # Create black canvas
-        canvas = np.zeros(
-            (self.canvas_size, self.canvas_size, 3),
-            dtype=np.uint8
-        )
+        # Create or reuse black canvas
+        if self._cached_canvas is None or self._cached_canvas.shape[:2] != (self.canvas_size, self.canvas_size):
+            self._cached_canvas = np.zeros(
+                (self.canvas_size, self.canvas_size, 3),
+                dtype=np.uint8
+            )
+        else:
+            self._cached_canvas.fill(0)
+            
+        canvas = self._cached_canvas
         
         # Add title
         if title:
@@ -132,24 +123,12 @@ class SkeletonVisualizer:
                 (10, 25),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
-                COLOR_TEXT if not has_nan else COLOR_INVALID,
+                COLOR_TEXT,
                 1,
             )
-        
-        # If invalid, return blank canvas with message
-        if has_nan:
-            cv2.putText(
-                canvas, "INVALID FRAME (low torso confidence)",
-                (10, 60),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                COLOR_INVALID,
-                1,
-            )
-            return canvas
         
         # ===== Scale normalized coordinates to pixel space =====
-        kpts_px = self._normalize_to_pixels(normalized_keypoints)
+        kpts_px = self._normalize_to_pixels(normalized_keypoints, scores)
         
         # ===== Draw skeleton connections =====
         for idx_from, idx_to in SKELETON_CONNECTIONS:
@@ -162,6 +141,9 @@ class SkeletonVisualizer:
             
             # Confidence-weighted line thickness (fade weak connections)
             conf_avg = (scores[idx_from] + scores[idx_to]) / 2.0
+            if conf_avg < 0.1:
+                continue
+
             line_thickness = max(1, int(self.line_thickness * conf_avg))
             
             pt_from_int = tuple(map(int, pt_from))
@@ -180,19 +162,20 @@ class SkeletonVisualizer:
         for idx in range(17):
             pt = kpts_px[idx]
             
-            if np.isnan(pt).any():
+            if np.isnan(pt).any() or scores[idx] < 0.1:
                 continue
             
             pt_int = tuple(map(int, pt))
             conf = scores[idx]
             
             # Special colors for torso anchors
-            if idx in [11, 12]:  # Pelvis
+            if idx in [LEFT_HIP, RIGHT_HIP]:  # Pelvis
                 color = COLOR_PELVIS
                 radius = self.point_radius + 1
-            elif idx in [5, 6]:  # Shoulders (neck anchor)
+            elif idx in [LEFT_SHOULDER, RIGHT_SHOULDER]:  # Shoulders (neck anchor)
                 color = COLOR_NECK
                 radius = self.point_radius + 1
+
             else:
                 color = COLOR_KEYPOINT
                 radius = self.point_radius
@@ -236,7 +219,7 @@ class SkeletonVisualizer:
                 )
         
         # Draw origin marker (pelvis should be near center for normalized poses)
-        origin_px = self._normalize_to_pixels(np.array([[0.0, 0.0]]))[0]
+        origin_px = self._normalize_to_pixels(np.array([[0.0, 0.0]]), np.array([1.0]))[0]
         if not np.isnan(origin_px).any():
             origin_px_int = tuple(map(int, origin_px))
             cv2.drawMarker(
@@ -250,7 +233,7 @@ class SkeletonVisualizer:
         
         return canvas
     
-    def _normalize_to_pixels(self, norm_coords: np.ndarray) -> np.ndarray:
+    def _normalize_to_pixels(self, norm_coords: np.ndarray, scores: np.ndarray) -> np.ndarray:
         """
         Convert normalized coordinates to pixel space.
         
@@ -259,128 +242,41 @@ class SkeletonVisualizer:
         
         Args:
             norm_coords: Shape (N, 2), normalized coordinates
+            scores: Shape (N,), confidence scores
         
         Returns:
             Pixel coordinates, shape (N, 2), clamped to canvas bounds
         """
-        # Find bounds of skeleton
-        valid_mask = ~np.isnan(norm_coords).any(axis=1)
-        
+        valid_mask = (~np.isnan(norm_coords).any(axis=1)) & (scores > 0.1)
         if not valid_mask.any():
-            # No valid points, return NaNs
-            return np.full_like(norm_coords, np.nan)
+            valid_mask = ~np.isnan(norm_coords).any(axis=1)
+            if not valid_mask.any():
+                return np.full_like(norm_coords, np.nan)
         
         valid_coords = norm_coords[valid_mask]
-        
         x_min, x_max = valid_coords[:, 0].min(), valid_coords[:, 0].max()
         y_min, y_max = valid_coords[:, 1].min(), valid_coords[:, 1].max()
         
-        # Handle degenerate cases
         if x_min == x_max:
-            x_min -= 0.5
-            x_max += 0.5
+            x_min, x_max = x_min - 0.5, x_max + 0.5
         if y_min == y_max:
-            y_min -= 0.5
-            y_max += 0.5
+            y_min, y_max = y_min - 0.5, y_max + 0.5
         
-        width = x_max - x_min
-        height = y_max - y_min
+        scale = (self.canvas_size - 2 * self.margin_px) / max(x_max - x_min, y_max - y_min)
         
-        # Apply margin and fit to canvas
-        available_size = self.canvas_size - 2 * self.margin_px
-        scale = available_size / max(width, height)
-        
-        # Transform: normalize -> pixel space
         px_coords = np.empty_like(norm_coords)
-        
-        # X: shift to positive, scale, add offset
         px_coords[:, 0] = (norm_coords[:, 0] - x_min) * scale + self.margin_px
-        
-        # Y: flip (image coords have Y increasing downward)
-        # and shift to positive, scale, add offset
         px_coords[:, 1] = (norm_coords[:, 1] - y_min) * scale + self.margin_px
         
-        # Clamp to canvas bounds
-        px_coords = np.clip(
-            px_coords,
-            0,
-            self.canvas_size - 1,
-        )
+        # Center the skeleton in the canvas
+        current_w = (x_max - x_min) * scale
+        current_h = (y_max - y_min) * scale
+        offset_x = (self.canvas_size - 2 * self.margin_px - current_w) / 2
+        offset_y = (self.canvas_size - 2 * self.margin_px - current_h) / 2
         
-        # Restore NaN for invalid points
-        px_coords[~valid_mask] = np.nan
+        px_coords[:, 0] += offset_x
+        px_coords[:, 1] += offset_y
         
+        px_coords = np.clip(px_coords, 0, self.canvas_size - 1)
+        # We don't NaN out invalid coords because we still want to draw lines to them if they exist
         return px_coords
-    
-    @staticmethod
-    def compare_original_vs_normalized(
-        original_keypoints: np.ndarray,
-        original_scores: np.ndarray,
-        normalized_keypoints: np.ndarray,
-        canvas_size: int = 500,
-    ) -> np.ndarray:
-        """
-        Render side-by-side comparison of original and normalized skeletons.
-        
-        Args:
-            original_keypoints: Shape (17, 2), raw pixel coords
-            original_scores: Shape (17,), confidence scores
-            normalized_keypoints: Shape (17, 2), normalized coords
-            canvas_size: Size of each canvas
-        
-        Returns:
-            Composite image [original | normalized], shape (canvas_size, 2*canvas_size, 3)
-        """
-        viz = SkeletonVisualizer(canvas_size=canvas_size)
-        
-        # Render original (need to normalize coordinates for display)
-        canvas_orig = viz.render(
-            original_keypoints,
-            original_scores,
-            title="Original (Raw Pixels)",
-        )
-        
-        # Render normalized
-        canvas_norm = viz.render(
-            normalized_keypoints,
-            original_scores,
-            title="Normalized (Torso-Relative)",
-        )
-        
-        # Concatenate horizontally
-        composite = np.hstack([canvas_orig, canvas_norm])
-        
-        return composite
-
-
-def visualize_normalized_pose(
-    normalized_keypoints: np.ndarray,
-    scores: Optional[np.ndarray] = None,
-    window_name: str = "Normalized Skeleton",
-    canvas_size: int = 500,
-    display_time_ms: int = 0,
-) -> Optional[np.ndarray]:
-    """
-    Quick utility to display normalized skeleton in a window.
-    
-    Args:
-        normalized_keypoints: Shape (17, 2)
-        scores: Shape (17,), optional
-        window_name: OpenCV window name
-        canvas_size: Canvas size in pixels
-        display_time_ms: Time to display (0 = wait for key press)
-    
-    Returns:
-        The rendered canvas (uint8 BGR image)
-    """
-    viz = SkeletonVisualizer(canvas_size=canvas_size)
-    canvas = viz.render(
-        normalized_keypoints,
-        scores,
-        title=window_name,
-    )
-    
-    cv2.imshow(window_name, canvas)
-    cv2.waitKey(display_time_ms)
-    
-    return canvas

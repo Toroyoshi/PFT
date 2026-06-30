@@ -16,35 +16,15 @@ Key Features:
 from dataclasses import dataclass
 from typing import Optional, Tuple
 import numpy as np
-from rich import print as rprint
 
+from Detecao.skeleton import (
+    KEYPOINT_NAMES as COCO_KEYPOINT_NAMES,
+    LEFT_HIP as PELVIS_LEFT_IDX,
+    RIGHT_HIP as PELVIS_RIGHT_IDX,
+    LEFT_SHOULDER as SHOULDER_LEFT_IDX,
+    RIGHT_SHOULDER as SHOULDER_RIGHT_IDX
+)
 
-# COCO 17 Keypoint Indices (RTMPose format)
-COCO_KEYPOINT_NAMES = [
-    'nose',           # 0
-    'left_eye',       # 1
-    'right_eye',      # 2
-    'left_ear',       # 3
-    'right_ear',      # 4
-    'left_shoulder',  # 5
-    'right_shoulder', # 6
-    'left_elbow',     # 7
-    'right_elbow',    # 8
-    'left_wrist',     # 9
-    'right_wrist',    # 10
-    'left_hip',       # 11 (pelvis left)
-    'right_hip',      # 12 (pelvis right)
-    'left_knee',      # 13
-    'right_knee',     # 14
-    'left_ankle',     # 15
-    'right_ankle',    # 16
-]
-
-# Anatomical anchor indices
-PELVIS_LEFT_IDX = 11
-PELVIS_RIGHT_IDX = 12
-SHOULDER_LEFT_IDX = 5
-SHOULDER_RIGHT_IDX = 6
 
 
 @dataclass
@@ -125,10 +105,6 @@ class SpatialNormalizer:
                 allow_invalid_torso=spatial_cfg.get("allow_invalid_torso", False),
             )
         self._prev_valid_pose: Optional[NormalizedPose] = None
-        rprint(
-            f"[NORMALIZER] Initialized with torso_confidence_threshold="
-            f"{self.params.torso_confidence_threshold}"
-        )
     
     def normalize(
         self,
@@ -164,18 +140,30 @@ class SpatialNormalizer:
         # Pelvis: midpoint of left hip (11) and right hip (12)
         pelvis_left = keypoints[PELVIS_LEFT_IDX]      # [x, y]
         pelvis_right = keypoints[PELVIS_RIGHT_IDX]    # [x, y]
-        pelvis = (pelvis_left + pelvis_right) * 0.5   # Vectorized average
+        
+        left_hip_ok = scores[PELVIS_LEFT_IDX] >= self.params.torso_confidence_threshold
+        right_hip_ok = scores[PELVIS_RIGHT_IDX] >= self.params.torso_confidence_threshold
+        
+        if left_hip_ok and right_hip_ok:
+            pelvis = (pelvis_left + pelvis_right) * 0.5
+            pelvis_conf = np.minimum(scores[PELVIS_LEFT_IDX], scores[PELVIS_RIGHT_IDX])
+        elif left_hip_ok:
+            # Shift slightly towards estimated center based on shoulder width if neck is visible
+            pelvis = pelvis_left
+            pelvis_conf = scores[PELVIS_LEFT_IDX]
+        elif right_hip_ok:
+            pelvis = pelvis_right
+            pelvis_conf = scores[PELVIS_RIGHT_IDX]
+        else:
+            pelvis = (pelvis_left + pelvis_right) * 0.5
+            pelvis_conf = np.minimum(scores[PELVIS_LEFT_IDX], scores[PELVIS_RIGHT_IDX])
         
         # Neck: midpoint of left shoulder (5) and right shoulder (6)
         shoulder_left = keypoints[SHOULDER_LEFT_IDX]  # [x, y]
         shoulder_right = keypoints[SHOULDER_RIGHT_IDX]  # [x, y]
         neck = (shoulder_left + shoulder_right) * 0.5  # Vectorized average
         
-        # Torso confidence: min of the 4 torso joints
-        pelvis_conf = np.minimum(
-            scores[PELVIS_LEFT_IDX],
-            scores[PELVIS_RIGHT_IDX]
-        )
+        # Torso confidence: min of the pelvis and neck anchors
         neck_conf = np.minimum(
             scores[SHOULDER_LEFT_IDX],
             scores[SHOULDER_RIGHT_IDX]
@@ -184,6 +172,14 @@ class SpatialNormalizer:
         
         # Check torso validity
         is_valid = bool(torso_conf >= self.params.torso_confidence_threshold)
+        
+        # Virtual Pelvis Fallback for waist-up/occluded hips
+        if not is_valid and neck_conf >= self.params.torso_confidence_threshold:
+            # Estimate pelvis as neck + [0, 1.2 * shoulder_width]
+            shoulder_width = np.float32(np.linalg.norm(shoulder_left - shoulder_right))
+            if shoulder_width >= self.params.min_torso_length_px:
+                pelvis = neck + np.array([0.0, 1.2 * shoulder_width], dtype=np.float32)
+                is_valid = True
         
         if not is_valid:
             # Return invalid frame with NaNs
@@ -201,7 +197,18 @@ class SpatialNormalizer:
         
         # ===== Compute Torso Length (Vectorized) =====
         torso_vec = neck - pelvis              # [dx, dy]
-        torso_length = np.float32(np.linalg.norm(torso_vec))  # Euclidean distance (default de linalg é 64float->float32)
+        raw_torso_length = np.float32(np.linalg.norm(torso_vec))  # Euclidean distance
+        
+        # Robust anatomical scaling: prevent shrinking when bending forward
+        shoulder_width = np.float32(np.linalg.norm(shoulder_left - shoulder_right))
+        hip_width = np.float32(np.linalg.norm(pelvis_left - pelvis_right))
+        
+        torso_length = np.float32(max(
+            raw_torso_length,
+            shoulder_width * 1.5,
+            hip_width * 1.5,
+            self.params.min_torso_length_px
+        ))
         
         if torso_length < self.params.min_torso_length_px:
             # Torso too small, return invalid

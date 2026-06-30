@@ -4,12 +4,8 @@ import cv2
 import numpy as np
 
 
-COCO_SKELETON = [
-    (0, 1), (0, 2), (1, 3), (2, 4),
-    (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),
-    (5, 11), (6, 12), (11, 12),
-    (11, 13), (13, 15), (12, 14), (14, 16),
-]
+from Detecao.skeleton import SKELETON_CONNECTIONS
+
 
 
 def _to_color(value, fallback):
@@ -17,13 +13,6 @@ def _to_color(value, fallback):
         return tuple(int(v) for v in value)
     return fallback
 
-
-def _is_single_pose(keypoints) -> bool:
-    try:
-        array = np.asarray(keypoints)
-    except Exception:
-        return False
-    return array.ndim == 2 and array.shape == (17, 2)
 
 # Class para renderizar pose e informações na tela
 class PoseRenderer:
@@ -42,48 +31,37 @@ class PoseRenderer:
         self.color_text = _to_color(colors.get("text"), (0, 255, 0))
         self.color_warning = _to_color(colors.get("warning"), (0, 0, 255))
         self.color_muted = _to_color(colors.get("muted"), (200, 200, 200))
+        self._cached_canvas = None
 
     def _draw_pose(self, image, keypoints, scores, line_color, point_color):
-        for i, j in COCO_SKELETON:
-            if i >= len(keypoints) or j >= len(keypoints):
-                continue
+        for i, j in SKELETON_CONNECTIONS:
+            if scores[i] > self.confidence_threshold and scores[j] > self.confidence_threshold:
+                xi, yi = int(keypoints[i][0]), int(keypoints[i][1])
+                xj, yj = int(keypoints[j][0]), int(keypoints[j][1])
+                cv2.line(image, (xi, yi), (xj, yj), line_color, 2)
 
-            ci = scores[i] if i < len(scores) else 0.0
-            cj = scores[j] if j < len(scores) else 0.0
-            if ci <= self.confidence_threshold or cj <= self.confidence_threshold:
-                continue
-
-            xi, yi = map(int, keypoints[i])
-            xj, yj = map(int, keypoints[j])
-            cv2.line(image, (xi, yi), (xj, yj), line_color, 2)
-
-        for idx, point in enumerate(keypoints):
-            conf = scores[idx] if idx < len(scores) else 0.0
-            if conf <= self.confidence_threshold:
-                continue
-
-            x, y = int(point[0]), int(point[1])
-            cv2.circle(image, (x, y), 5, point_color, -1)
-            cv2.circle(image, (x, y), 5, (0, 0, 0), 1)
+        for point, conf in zip(keypoints, scores):
+            if conf > self.confidence_threshold:
+                x, y = int(point[0]), int(point[1])
+                cv2.circle(image, (x, y), 5, point_color, -1)
+                cv2.circle(image, (x, y), 5, (0, 0, 0), 1)
 
     def _iter_poses(self, keypoints, scores):
-        if keypoints is None or scores is None:
+        if keypoints is None or scores is None or len(keypoints) == 0:
             return []
 
-        if _is_single_pose(keypoints):
-            return [(np.asarray(keypoints), np.asarray(scores))]
+        k_arr = np.asarray(keypoints)
+        s_arr = np.asarray(scores)
 
-        keypoints_array = np.asarray(keypoints)
-        scores_array = np.asarray(scores)
+        if k_arr.ndim == 2 and k_arr.shape == (17, 2):
+            return [(k_arr, s_arr)]
 
-        if keypoints_array.ndim != 3 or keypoints_array.shape[1:] != (17, 2):
-            return []
+        if k_arr.ndim == 3 and k_arr.shape[1:] == (17, 2):
+            if s_arr.ndim == 1:
+                s_arr = np.repeat(s_arr[np.newaxis, :], len(k_arr), axis=0)
+            return list(zip(k_arr, s_arr))
 
-        if scores_array.ndim == 1:
-            scores_array = np.repeat(scores_array[np.newaxis, :], keypoints_array.shape[0], axis=0)
-
-        count = min(len(keypoints_array), len(scores_array))
-        return [(keypoints_array[i], scores_array[i]) for i in range(count)]
+        return []
 
     def render(self, frame, keypoints, scores):
         if not self.enabled:
@@ -97,8 +75,13 @@ class PoseRenderer:
         if not self.show_skeleton_canvas:
             return frame_vis
 
-        # Build separate canvas for skeletons but keep main frame size unchanged
-        canvas = np.full_like(frame, 255)
+        # Re-use or initialize canvas to prevent memory thrashing
+        if self._cached_canvas is None or self._cached_canvas.shape != frame.shape:
+            self._cached_canvas = np.full_like(frame, 255)
+        else:
+            self._cached_canvas.fill(255)
+            
+        canvas = self._cached_canvas
         for pose_keypoints, pose_scores in poses:
             self._draw_pose(canvas, pose_keypoints, pose_scores, self.color_canvas_line, self.color_canvas_point)
 
